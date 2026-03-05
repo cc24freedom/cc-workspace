@@ -1,0 +1,51 @@
+# 临时文件
+~$*.docx
+~$*.xlsx
+*.tmp
+tmp_*
+*_extracted.txt
+brief_text.txt
+pdf_text.txt
+template_copy.docx
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 大文件/缓存
+*.zip
+*.rar
+*.7z
+node_modules/
+.cache/
+
+# 大型交付文档（用网盘/U盘同步）
+*.docx
+*.pptx
+*.xlsx
+*.pdf
+*.vsdx
+
+# cc-tools 子仓库（已有独立仓库）
+cc-tools/.git/
