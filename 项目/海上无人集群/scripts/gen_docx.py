@@ -1,0 +1,808 @@
+# -*- coding: utf-8 -*-
+"""根据模板格式生成技术规格书 Word 文档 v0.1"""
+
+import re
+import glob as _glob
+from lxml import etree as _etree
+from latex2mathml.converter import convert as _latex2mml
+
+from docx import Document
+from docx.shared import Pt, Cm, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
+
+# ============ 格式常量（从模板提取） ============
+FONT_CN = '仿宋_GB2312'
+FONT_EN = 'Calibri'
+FONT_TITLE = '方正小标宋简体'
+FONT_SIZE_BODY = Pt(14)
+FONT_SIZE_TITLE = Pt(26)
+FONT_SIZE_SUBTITLE = Pt(16)
+LINE_SPACING_BODY = 1.5       # 1.5倍行距（倍数值）
+LINE_SPACING_HEADING = 1.5   # 1.5倍行距（倍数值）
+FIRST_INDENT = Cm(0.74)
+
+# ============ 工具函数 ============
+def set_run_font(run, cn_font=FONT_CN, en_font=FONT_EN, size=FONT_SIZE_BODY, bold=False):
+    run.font.size = size
+    run.font.name = en_font
+    run.font.bold = bold
+    rPr = run._element.get_or_add_rPr()
+    rFonts = rPr.find(qn('w:rFonts'))
+    if rFonts is None:
+        rFonts = OxmlElement('w:rFonts')
+        rPr.insert(0, rFonts)
+    rFonts.set(qn('w:eastAsia'), cn_font)
+    rFonts.set(qn('w:ascii'), en_font)
+    rFonts.set(qn('w:hAnsi'), en_font)
+
+def add_para(doc, text, cn_font=FONT_CN, en_font=FONT_EN, size=FONT_SIZE_BODY,
+             bold=False, align=None, first_indent=None, line_spacing=LINE_SPACING_BODY,
+             space_before=Pt(0), space_after=Pt(0)):
+    para = doc.add_paragraph()
+    if align is not None:
+        para.alignment = align
+    fmt = para.paragraph_format
+    fmt.line_spacing = line_spacing
+    if not isinstance(line_spacing, float):
+        fmt.line_spacing_rule = 4  # EXACTLY，用于封面等固定间距场景
+    if first_indent:
+        fmt.first_line_indent = first_indent
+    fmt.space_before = space_before
+    fmt.space_after = space_after
+    run = para.add_run(text)
+    set_run_font(run, cn_font, en_font, size, bold)
+    return para
+
+def add_mixed_para(doc, segments, align=None, first_indent=None,
+                   line_spacing=LINE_SPACING_BODY, space_before=Pt(0), space_after=Pt(0)):
+    para = doc.add_paragraph()
+    if align is not None:
+        para.alignment = align
+    fmt = para.paragraph_format
+    fmt.line_spacing = line_spacing
+    if not isinstance(line_spacing, float):
+        fmt.line_spacing_rule = 4  # EXACTLY，用于封面等固定间距场景
+    if first_indent:
+        fmt.first_line_indent = first_indent
+    fmt.space_before = space_before
+    fmt.space_after = space_after
+    for text, bold in segments:
+        run = para.add_run(text)
+        set_run_font(run, bold=bold)
+    return para
+
+def add_table(doc, headers, rows, col_widths=None, header_bold=True, body_size=Pt(12)):
+    table = doc.add_table(rows=1 + len(rows), cols=len(headers))
+    table.style = 'Table Grid'
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    for i, h in enumerate(headers):
+        cell = table.rows[0].cells[i]
+        cell.text = ''
+        p = cell.paragraphs[0]
+        run = p.add_run(h)
+        set_run_font(run, size=Pt(12), bold=header_bold)
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for r_idx, row_data in enumerate(rows):
+        for c_idx, val in enumerate(row_data):
+            cell = table.rows[r_idx + 1].cells[c_idx]
+            cell.text = ''
+            p = cell.paragraphs[0]
+            run = p.add_run(str(val))
+            set_run_font(run, size=body_size)
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    if col_widths:
+        for i, w in enumerate(col_widths):
+            for row in table.rows:
+                row.cells[i].width = w
+    for row in table.rows:
+        for cell in row.cells:
+            for para in cell.paragraphs:
+                fmt = para.paragraph_format
+                fmt.line_spacing = Pt(18)
+                fmt.line_spacing_rule = 4
+                fmt.space_before = Pt(2)
+                fmt.space_after = Pt(2)
+    return table
+
+def add_chapter_title(doc, text):
+    """一级标题（一、二、三...）→ 大纲级别1"""
+    p = add_para(doc, text, bold=True, first_indent=FIRST_INDENT,
+                 line_spacing=LINE_SPACING_HEADING, space_before=Pt(12), space_after=Pt(6))
+    set_outline_level(p, 0)
+
+def add_section_title(doc, text):
+    """二级标题（4.1, 4.2...）→ 大纲级别2"""
+    p = add_para(doc, text, bold=True, first_indent=FIRST_INDENT,
+                 line_spacing=LINE_SPACING_HEADING, space_before=Pt(8), space_after=Pt(4))
+    set_outline_level(p, 1)
+
+def add_subsection_title(doc, text):
+    """三级标题（4.2.1...）→ 大纲级别3"""
+    p = add_para(doc, text, bold=True, first_indent=FIRST_INDENT,
+                 line_spacing=LINE_SPACING_BODY, space_before=Pt(6), space_after=Pt(3))
+    set_outline_level(p, 2)
+
+def add_subsubsection_title(doc, text):
+    """四级标题（4.1.1, 4.1.2...）→ 大纲级别4"""
+    p = add_para(doc, text, bold=True, first_indent=FIRST_INDENT,
+                 line_spacing=LINE_SPACING_BODY, space_before=Pt(5), space_after=Pt(2))
+    set_outline_level(p, 3)
+
+def add_body(doc, text):
+    add_para(doc, text, first_indent=FIRST_INDENT, line_spacing=LINE_SPACING_BODY)
+
+def add_body_bold_prefix(doc, bold_text, normal_text):
+    add_mixed_para(doc, [(bold_text, True), (normal_text, False)],
+                   first_indent=FIRST_INDENT, line_spacing=LINE_SPACING_BODY)
+
+def add_bullet(doc, text, bold_prefix=None):
+    if bold_prefix:
+        add_mixed_para(doc, [(bold_prefix, True), (text, False)],
+                       first_indent=FIRST_INDENT, line_spacing=LINE_SPACING_BODY)
+    else:
+        add_para(doc, text, first_indent=FIRST_INDENT, line_spacing=LINE_SPACING_BODY)
+
+def set_outline_level(para, level):
+    """设置段落大纲级别（0=一级标题, 1=二级, 2=三级, 3=四级）"""
+    pPr = para._element.get_or_add_pPr()
+    outlineLvl = OxmlElement('w:outlineLvl')
+    outlineLvl.set(qn('w:val'), str(level))
+    pPr.append(outlineLvl)
+
+# ============ OMML 公式转换（LaTeX → MathML → OMML）============
+_MML2OMML_XSL = r'C:\Program Files\Microsoft Office\root\Office16\MML2OMML.XSL'
+_M_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
+_omml_transform = None
+
+def _get_omml_transform():
+    global _omml_transform
+    if _omml_transform is None:
+        xsl_paths = (
+            [_MML2OMML_XSL]
+            + _glob.glob(r'C:\Program Files\Microsoft Office\root\Office*\MML2OMML.XSL')
+            + _glob.glob(r'C:\Program Files (x86)\Microsoft Office\root\Office*\MML2OMML.XSL')
+        )
+        for p in xsl_paths:
+            try:
+                _omml_transform = _etree.XSLT(_etree.parse(p))
+                break
+            except Exception:
+                continue
+    return _omml_transform
+
+def add_formula(doc, latex_str):
+    """数学公式段落：将 LaTeX 转换为 Word OMML 方程式对象（专业格式）"""
+    para = doc.add_paragraph()
+    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    fmt = para.paragraph_format
+    fmt.line_spacing = LINE_SPACING_BODY
+    fmt.space_before = Pt(6)
+    fmt.space_after = Pt(6)
+
+    inserted = False
+    transform = _get_omml_transform()
+    if transform is not None:
+        try:
+            mml_str = _latex2mml(latex_str)
+            mml_elem = _etree.fromstring(mml_str.encode('utf-8'))
+            omml_elem = transform(mml_elem).getroot()  # <m:oMath>
+
+            # 清空段落中已有的非 pPr 子元素
+            p = para._element
+            for child in list(p):
+                if not child.tag.endswith('}pPr'):
+                    p.remove(child)
+
+            # 构造 <m:oMathPara><m:oMathParaPr><m:jc m:val="center"/></m:oMathParaPr> + oMath
+            math_para = _etree.SubElement(p, f'{{{_M_NS}}}oMathPara')
+            para_pr = _etree.SubElement(math_para, f'{{{_M_NS}}}oMathParaPr')
+            jc = _etree.SubElement(para_pr, f'{{{_M_NS}}}jc')
+            jc.set(f'{{{_M_NS}}}val', 'center')
+            math_para.append(omml_elem)
+            inserted = True
+        except Exception as e:
+            print(f'[公式转换失败，降级为文本] {e}\n  公式: {latex_str}')
+
+    if not inserted:
+        # 降级：Cambria Math 文本
+        run = para.add_run(latex_str)
+        run.font.name = 'Cambria Math'
+        run.font.size = Pt(13)
+        rPr = run._element.get_or_add_rPr()
+        rFonts = rPr.find(qn('w:rFonts'))
+        if rFonts is None:
+            rFonts = OxmlElement('w:rFonts')
+            rPr.insert(0, rFonts)
+        for attr in ('w:ascii', 'w:hAnsi', 'w:eastAsia', 'w:cs'):
+            rFonts.set(qn(attr), 'Cambria Math')
+
+    return para
+
+# ============ 行内公式支持（$...$）============
+_INLINE_MATH_RE = re.compile(r'\$(.+?)\$', re.DOTALL)
+
+def _append_inline_math_runs(para, text):
+    """将含 $...$ 的文本追加到段落，$ 内容转为行内 OMML，其余为正常 run"""
+    p = para._element
+    transform = _get_omml_transform()
+    parts = _INLINE_MATH_RE.split(text)
+    for i, part in enumerate(parts):
+        if not part:
+            continue
+        if i % 2 == 0:
+            run = para.add_run(part)
+            set_run_font(run)
+        else:
+            math_ok = False
+            if transform is not None:
+                try:
+                    mml_str = _latex2mml(part)
+                    omml_elem = transform(_etree.fromstring(mml_str.encode('utf-8'))).getroot()
+                    p.append(omml_elem)
+                    math_ok = True
+                except Exception as e:
+                    print(f'[行内公式转换失败] {e}: {part}')
+            if not math_ok:
+                run = para.add_run(part)
+                run.font.name = 'Cambria Math'
+
+def add_body_md(doc, text, first_indent=None, space_before=Pt(0), space_after=Pt(0)):
+    """正文段落，支持 $...$ 行内 LaTeX 公式"""
+    para = doc.add_paragraph()
+    fmt = para.paragraph_format
+    fmt.line_spacing = LINE_SPACING_BODY
+    fmt.first_line_indent = first_indent if first_indent is not None else FIRST_INDENT
+    fmt.space_before = space_before
+    fmt.space_after = space_after
+    _append_inline_math_runs(para, text)
+    return para
+
+def add_bullet_md(doc, text, bold_prefix=None):
+    """带 bold_prefix 的正文段，text 部分支持 $...$ 行内 LaTeX 公式"""
+    para = doc.add_paragraph()
+    fmt = para.paragraph_format
+    fmt.line_spacing = LINE_SPACING_BODY
+    fmt.first_line_indent = FIRST_INDENT
+    fmt.space_before = Pt(0)
+    fmt.space_after = Pt(0)
+    if bold_prefix:
+        run = para.add_run(bold_prefix)
+        set_run_font(run, bold=True)
+    _append_inline_math_runs(para, text)
+    return para
+
+def add_numbered_body(doc, number, bold_text, normal_text):
+    """带编号的正文：如 '1. 网格采样：……'"""
+    add_mixed_para(doc, [(f'{number}. {bold_text}', True), (normal_text, False)],
+                   first_indent=FIRST_INDENT, line_spacing=LINE_SPACING_BODY)
+
+
+# ============ 开始生成文档 ============
+doc = Document()
+
+section = doc.sections[0]
+section.page_width = Cm(21)
+section.page_height = Cm(29.7)
+section.top_margin = Cm(2.54)
+section.bottom_margin = Cm(2.54)
+section.left_margin = Cm(3.17)
+section.right_margin = Cm(3.17)
+
+style = doc.styles['Normal']
+style.font.name = FONT_EN
+style.font.size = FONT_SIZE_BODY
+style.element.rPr.rFonts.set(qn('w:eastAsia'), FONT_CN)
+
+# ========== 封面页 ==========
+add_para(doc, '附件1', first_indent=FIRST_INDENT, line_spacing=Pt(26))
+
+for _ in range(3):
+    add_para(doc, '', line_spacing=Pt(26))
+
+add_para(doc, '技 术 规 格 书', cn_font=FONT_TITLE, size=FONT_SIZE_TITLE,
+         align=WD_ALIGN_PARAGRAPH.CENTER, line_spacing=Pt(40),
+         space_before=Pt(20), space_after=Pt(20))
+
+add_para(doc, '', line_spacing=Pt(20))
+add_body_bold_prefix(doc, '合同名称', '：面向海上作战决策建模的数据样本生成关键技术研究')
+add_para(doc, '', line_spacing=Pt(12))
+
+sig_table = doc.add_table(rows=2, cols=4)
+sig_table.style = 'Table Grid'
+sig_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+sig_data = [
+    ['甲方项目负责人', '（签字）\n     年  月  日', '乙方项目负责人', '（签字）\n    年  月  日'],
+    ['编  写', '（签字）\n    年  月  日', '校  对', '（签字）\n    年  月  日'],
+]
+for r_idx, row_data in enumerate(sig_data):
+    for c_idx, val in enumerate(row_data):
+        cell = sig_table.rows[r_idx].cells[c_idx]
+        cell.text = ''
+        p = cell.paragraphs[0]
+        run = p.add_run(val)
+        set_run_font(run, size=Pt(12))
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        fmt = p.paragraph_format
+        fmt.line_spacing = Pt(18)
+        fmt.line_spacing_rule = 4
+
+for _ in range(3):
+    add_para(doc, '', line_spacing=Pt(20))
+
+add_para(doc, '海军大连舰艇学院科研学术处制', size=Pt(14), bold=True,
+         align=WD_ALIGN_PARAGRAPH.CENTER, line_spacing=Pt(24))
+
+doc.add_page_break()
+
+# ========== 研究背景与总体定位 ==========
+add_chapter_title(doc, '研究背景与总体定位')
+
+# 一、研究背景
+add_section_title(doc, '一、研究背景')
+add_body(doc, '本项目是"无人集群海上跨域维权智能决策体系设计研究"的重要组成部分。该体系围绕"跨域协同、智能决策与体系验证"三大核心需求，构建以无人集群为主体、以大模型智能决策为核心、以高保真仿真引擎为支撑的海上跨域维权技术体系，形成"需求牵引—智能生成—仿真验证—迭代优化"的闭环研发模式。')
+add_body(doc, '当前，海上作战决策建模与智能决策模型构建对高质量数据样本的需求日益迫切，而现有数据积累面临以下突出问题：')
+add_table(doc,
+    ['问题类型', '具体表现'],
+    [
+        ['规模不大', '难以满足大规模验证的数量需求'],
+        ['针对性不强', '与具体决策任务的映射关系模糊'],
+        ['完备性不够', '战场态势、决策方案和作战行动各环节数据存在缺失'],
+        ['多样性不足', '参数空间覆盖有限，难以支撑场景泛化能力的培育'],
+        ['质量不高', '多源异构数据的标注、融合与质量评价缺乏体系化方法'],
+        ['个性化定制缺失', '无法按照具体决策建模任务快速组装所需数据集'],
+    ],
+    col_widths=[Cm(4), Cm(9.5)]
+)
+add_body(doc, '上述问题制约了海上作战智能决策模型的研究进展，亟需建立系统性的决策建模数据生成与服务能力。')
+
+# 二、总体定位
+add_section_title(doc, '二、总体定位')
+add_body_bold_prefix(doc, '在体系中的定位', '：本项目承担体系中的数据基础层职责，为大模型驱动的多智能体协同感知与智能决策研究提供高质量数据样本支撑。本项目是体系"智能生成"环节的数据来源，也是"仿真验证—迭代优化"闭环持续运转的数据基础。')
+add_body_bold_prefix(doc, '研究目标', '：开展海上作战决策建模数据需求分析、样本生成、数据治理和数据服务等关键技术研究，突破决策任务与建模数据需求映射、多样化数据生成与样本组装、数据样本的分类标注与融合等关键技术，形成涵盖数据需求分析、样本生成、数据治理和对外服务等全链路的海上作战决策建模用数据生成与服务方案，为大模型协同决策研究与仿真验证平台的持续迭代优化提供多层级数据基础支撑。')
+add_body_bold_prefix(doc, '技术路线', '：采用"规则生成+数据管理"双层架构，面向以水面舰艇编队为主体的海空协同作战场景：')
+add_bullet(doc, '：构建参数化战术规则引擎，划分5种海上作战战术行为类型和7个参数化控制点位，通过冷启动（规则引擎驱动仿真平台批量生成）和热启动（演习数据清洗增强）两种互补模式生成结构化样本；', bold_prefix='规则生成层')
+add_bullet(doc, '：建立编队/单舰/装备三层级样本数据库，实施规模性、多样性、价值性三维质量治理，通过数据服务接口对外提供按任务查询和个性化定制两类服务。', bold_prefix='数据管理层')
+add_body_bold_prefix(doc, '我方技术基础', '：超参数科技（深圳）有限公司是专注AI智能体领域的技术型企业，创始团队核心成员来自腾讯AI Lab，在游戏AI智能体领域深耕多年，技术实力居行业头部。团队转向军工市场后，先后承接中国兵器工业集团下属研究所及创新院多个智能体模型项目，积累了丰富的军用智能体系统工程经验，具备深厚的AI架构设计能力与大规模模型训练能力，具备从算法研发、模型训练、仿真验证到工程交付的端到端技术闭环能力。')
+
+doc.add_page_break()
+
+# ========== 一、工作范围 ==========
+add_chapter_title(doc, '一、工作范围')
+add_body(doc, '本项目承担以下工作内容：')
+
+work_items = [
+    ('1. 海上作战决策数据建模', '：编队/单舰/装备三层级决策数据模型及战场态势、决策方案、作战行动三类数据模式定义。'),
+    ('2. 参数化战术规则体系与规则引擎', '：5种海上作战战术行为类型的行为逻辑研究与定义，7个参数化控制点位设计，参数化规则引擎开发。'),
+    ('3. 双模式数据生成框架', '：冷启动（基于规则引擎生成参数化决策数据）和热启动（演习数据清洗增强）两种数据生成系统。'),
+    ('4. 决策建模样本数据库', '：编队/单舰/装备三层级数据库结构，数据入库流水线与多维查询接口。'),
+    ('5. 数据治理部件', '：规模性、多样性、价值性三维质量评价部件。'),
+    ('6. 数据服务部件', '：按典型任务参数查询和按个性化需求定制生成两类数据服务接口，配置文件参数化扩展。'),
+    ('7. 仿真平台数据接口适配', '：与仿真平台的想定数据格式对接与仿真输出数据格式转换。'),
+    ('8. 数据管理Web前端', '：数据查询浏览、数据生成任务管理、数据治理看板三类界面。'),
+    ('9. 测试验收', '：单元测试、集成测试、技术指标逐项验证，测试报告与使用手册。'),
+]
+for bold_part, normal_part in work_items:
+    add_body_bold_prefix(doc, bold_part, normal_part)
+
+# ========== 二、工作应遵守的标准和文件 ==========
+add_chapter_title(doc, '二、工作应遵守的标准和文件')
+add_body(doc, '本项目遵循以下标准和文件：')
+
+add_table(doc,
+    ['序号', '标准名称', '标准编号'],
+    [
+        ['1', '军用软件开发通用要求', 'GJB 2786A-2009'],
+        ['2', '质量管理体系要求', 'GB/T 19001-2016/ISO 9001:2015'],
+        ['3', '军用软件配置管理', 'GJB 5235-2004'],
+        ['4', '控制软件安全性设计指南', 'GJB/Z 102A-2012'],
+        ['5', '统一建模语言（UML）', 'GB/T 28174.1-2011'],
+    ],
+    col_widths=[Cm(1.5), Cm(6), Cm(6)]
+)
+
+# ========== 三、性能指标要求 ==========
+add_chapter_title(doc, '三、性能指标要求')
+add_section_title(doc, '3.1 数据样本生成原型系统指标')
+add_body(doc, '本系统须满足以下10项技术指标：')
+
+indicators = [
+    ['①', '决策建模数据需求分析方法的层级支持', '支持海上编队、单舰平台、武器装备3个层级的决策建模数据需求分析'],
+    ['②', '数据样本形式化表达的数据类型', '涵盖战场态势、决策方案、作战行动3种类数据'],
+    ['③', '数据样本生成模式', '支持基于仿真想定驱动的"冷启动"和基于真实演习与仿真联合驱动的"热启动"2种模式'],
+    ['④', '多样化数据生成点位数', '支持战场环境设置和红蓝双方兵力部署、行动策略、作战行动控制等7个点位的多样化数据生成'],
+    ['⑤', '数据对作战过程的支撑范围', '生成数据可支持海上作战"侦察—判断—决策—行动"（OODA）全过程运行'],
+    ['⑥', '同一态势下方案多样性', '在相同战场态势下，生成的数据样本可支持不少于3种作战方案'],
+    ['⑦', '数据库层级检索能力', '海上作战决策建模用数据库能按照编队作战—平台作战—装备使用3个层级抽取数据样本'],
+    ['⑧', '数据质量评价维度', '数据样本质量评价包含规模性、多样性、价值性3种质量评估指标'],
+    ['⑨', '数据供给服务方式', '支持按典型决策任务提供样本数据查询、按个性化需求定制所需数据2种数据供给服务方式'],
+    ['⑩', '个性化数据生成服务能力', '支持新建决策任务、定制数据生成方法等2种个性化数据生成服务'],
+]
+add_table(doc, ['序号', '指标项', '指标要求'], indicators,
+          col_widths=[Cm(1.2), Cm(4.5), Cm(8)])
+
+add_section_title(doc, '3.2 交付物形式')
+add_body(doc, '本项目交付物分为以下三类：')
+
+add_body_bold_prefix(doc, '（一）关键技术研究报告', '（4份）')
+add_table(doc,
+    ['序号', '报告名称', '验证方式'],
+    [
+        ['1', '海上作战决策建模数据需求分析研究报告', '专家评审'],
+        ['2', '数据样本生成机制研究报告', '专家评审'],
+        ['3', '数据治理技术研究报告', '专家评审'],
+        ['4', '数据服务方案研究报告', '专家评审'],
+    ],
+    col_widths=[Cm(1.2), Cm(9), Cm(2.5)]
+)
+
+add_body_bold_prefix(doc, '（二）演示验证原型系统', '（1套）')
+add_body(doc, '海上作战决策建模数据生成与服务演示验证系统，包含以下功能部件：')
+add_bullet(doc, '决策建模样本数据库（三层级数据存储与检索）')
+add_bullet(doc, '数据生成部件（冷启动/热启动双模式生成）')
+add_bullet(doc, '数据治理部件（规模性/多样性/价值性三维质量评价）')
+add_bullet(doc, '数据服务部件（典型任务查询与个性化定制服务）')
+add_body(doc, '验证方式：软件测试（包含单元测试、集成测试及技术指标逐项验证）。')
+
+add_body_bold_prefix(doc, '（三）原型系统配套文档', '（1套）')
+add_body(doc, '包括需求分析说明、技术设计说明、软件测试报告、使用手册等文档资料，随原型系统一并提交。')
+
+# ========== 四、应采取的技术方案和关键技术 ==========
+add_chapter_title(doc, '四、应采取的技术方案和关键技术')
+
+# ——— 4.1 总体技术路线 ———
+add_section_title(doc, '4.1 总体技术路线')
+
+add_body(doc, '本项目采用"规则生成+数据管理"双层架构，面向海上作战决策建模的数据样本生成与服务。系统总体架构如图1所示（架构示意图另附）。')
+add_body_bold_prefix(doc, '作战场景定位', '：本项目面向以水面舰艇编队为主体的海空协同作战场景，作战兵力包括水面舰艇及其搭载或协同的舰载机、无人机等航空力量，航空兵力在数据建模中作为编队的火力投送与侦察手段纳入，作战环境为单一海上环境。数据样本的战术规则设计、参数体系构建和数据模式定义均以该场景为基准展开。')
+add_body_bold_prefix(doc, '架构逻辑如下', '：')
+add_bullet(doc, '：构建参数化战术规则引擎，划分5种海上作战战术行为类型和7个参数化控制点位，通过参数矩阵驱动生成结构化数据样本。冷启动模式基于规则引擎直接生成参数化决策数据；热启动模式对已有演习数据进行清洗增强。', bold_prefix='规则生成层')
+add_bullet(doc, '：建立编队/单舰/装备三层级样本数据库，对入库数据实施质量治理，通过数据服务接口对外提供按任务查询和个性化定制两类服务。', bold_prefix='数据管理层')
+add_body(doc, '规则生成层与数据管理层之间采用标准化接口封装。冷启动模式下，规则引擎生成的参数配置经格式转换后输入仿真平台运行，仿真输出数据经格式转换后写入样本数据库。')
+add_body_bold_prefix(doc, '仿真平台集成与演示方式', '：本项目数据生成框架与仿真平台深度集成。冷启动模式下，仿真平台提供执行环境，规则引擎生成的想定参数经格式转换后驱动仿真平台运行，仿真输出的完整对战状态（GameState）数据经采集与字段映射后写入样本数据库；热启动模式下，已有演习系统产出的过程数据直接作为种子数据导入清洗增强流水线。演示验证原型系统面向仿真平台环境设计，通过仿真平台展示数据生成与管理全流程。')
+add_body_bold_prefix(doc, '合作方技术基础与工程优势', '：合作方在陆军相关项目中已积累多智能体仿真对抗框架、参数化想定生成能力及配套数据采集管道，上述基础模块可在本项目中直接复用，显著降低冷启动链路的开发周期。数据管理层采用成熟的Web工程技术栈，具备快速构建数据查询、任务管理、质量看板等前端界面的工程能力。框架采用标准化接口封装各功能模块，后续如需对接智能体模型训练，仅需在数据服务层替换输出接口，无需重构核心数据管理体系。')
+add_body_bold_prefix(doc, '主要流程', '：')
+add_body(doc, '冷启动链路：战术类型选择 + 参数矩阵采样 → 规则引擎生成参数化配置 → 格式转换为仿真平台可识别的想定格式 → 仿真平台执行仿真 → 采集仿真输出的态势、决策、行动过程数据 → 格式转换与字段映射 → 写入三层级样本数据库。')
+add_body(doc, '热启动链路：接收已有演习/开源数据 → 字段格式归一化与异常值清洗 → 在7个点位参数上施加受控随机扰动生成扩展样本 → 写入三层级样本数据库。')
+add_body(doc, '数据服务链路：用户通过Web前端或服务接口发起查询请求 → 按任务类型/战术类型/层级等条件检索数据库 → 返回匹配样本集合；或提交自定义参数配置 → 按配置组装所需数据样本。')
+
+# ——— 4.2 技术方案 ———
+add_section_title(doc, '4.2 技术方案')
+
+# ——— 4.2.1 参数化战术规则体系 ———
+add_subsection_title(doc, '4.2.1 参数化战术规则体系')
+add_body(doc, '海上作战决策数据的核心价值在于其战术逻辑的真实性与可控性。若数据生成过程缺乏先验领域知识的约束，所产生的数据将是随机噪声而非有效训练样本，无法支撑决策模型的有效学习。为此，本项目首先建立参数化战术规则体系，以海战领域的作战原则为基础，将5种战术行为类型和7个关键战术参数形式化为可计算的规则体系，并开发配套的规则引擎作为数据生成的逻辑核心。规则体系是后续双模式数据生成框架的"知识基座"——冷启动模式由规则引擎直接驱动生成，热启动模式以规则体系作为数据清洗和增强的参考框架。')
+
+add_body_bold_prefix(doc, '（一）战术行为类型定义', '')
+add_body(doc, '划分以下5种海上作战战术行为类型：')
+add_table(doc, ['战术类型', '典型适用场景'], [
+    ['进攻', '我方兵力优势明显，需主动夺取制海权或压制敌方舰队，可调用舰载机、无人机实施空中打击配合水面兵力推进'],
+    ['防守', '守护重要海域或港口，利用舰载机巡逻警戒扩大防御纵深，等待增援，阻止敌方舰队通过'],
+    ['侧翼包抄', '敌方阵型呈线性展开，存在侧翼暴露，可利用岛礁等地形掩护迂回，协调无人机实施侧翼侦察与火力牵制'],
+    ['保守', '兵力劣势条件下延缓敌方推进，利用无人机前出侦察获取态势信息，或在信息不足时避免冒进'],
+    ['协同突破', '敌方形成封锁线，需集中舰艇与航空兵力在局部形成绝对优势，以舰载机/无人机火力压制配合水面编队突破'],
+], col_widths=[Cm(2.5), Cm(11)])
+add_body(doc, '各战术类型的规则内容以配置文件形式管理。')
+
+add_body_bold_prefix(doc, '（二）参数化控制点位设计', '')
+add_body(doc, '设计7个参数化控制点位：')
+add_table(doc, ['点位', '参数名称', '控制内容', '影响的规则维度'], [
+    ['①', '机动速度系数', '兵力机动快慢', '机动策略、队形保持'],
+    ['②', '交战距离阈值', '接触交战的最小距离', '交战决策条件'],
+    ['③', '队形间距', '编队内部节点间距', '队形保持规则'],
+    ['④', '侦察范围', '侦察探测覆盖半径', '态势感知范围'],
+    ['⑤', '攻击选择偏好', '目标优先级权重', '交战决策条件'],
+    ['⑥', '协同权重', '多节点协同程度', '协同配合机制'],
+    ['⑦', '撤退条件', '触发撤退的阈值', '撤退触发条件'],
+], col_widths=[Cm(1.2), Cm(3), Cm(3.5), Cm(3.5)])
+
+add_body_bold_prefix(doc, '参数取值范围与含义说明', '：')
+add_table(doc, ['点位', '参数名称', '取值区间', '低值含义', '高值含义'], [
+    ['①', '机动速度系数', '0.3～1.0', '缓速机动，队形稳定优先', '高速机动，迅速接敌或脱离'],
+    ['②', '交战距离阈值', '5 km～50 km', '近战接手，火力密集', '远距接触，规避近距威胁'],
+    ['③', '队形间距', '0.5 km～5 km', '密集队形，协同密切', '疏散队形，扩大侦察覆盖'],
+    ['④', '侦察范围', '30 km～150 km', '短程探测，专注近域', '大范围态势感知'],
+    ['⑤', '攻击选择偏好', '0.0～1.0', '优先攻击近距目标', '优先攻击高价值目标'],
+    ['⑥', '协同权重', '0.0～1.0', '各舰相对独立行动', '强协同、一致行动'],
+    ['⑦', '撤退条件', '20%～60%', '损失轻微即撤，较保守', '承受重大损失仍坚持'],
+], col_widths=[Cm(1.0), Cm(2.5), Cm(2.5), Cm(3.5), Cm(3.5)], body_size=Pt(11))
+
+add_body_bold_prefix(doc, '关键参数联动说明', '：不同战术类型对应不同的参数组合倾向，规则引擎在加载战术配置时同步限定各参数的推荐取值区间：')
+add_table(doc, ['战术类型', '典型参数组合倾向', '说明'], [
+    ['进攻', '①高、②低、⑥高', '高速接敌、近距交战、强协同推进'],
+    ['防守', '①中、③大、④高', '扩大间距形成防御纵深，广域侦察预警'],
+    ['侧翼包抄', '①中、⑥中、④高', '迂回机动，保持态势感知'],
+    ['保守', '①低、②高、⑦低', '缓速保持距离，低损即撤'],
+    ['协同突破', '①高、⑥高、⑤高', '高速集中突破，优先打击高价值目标'],
+], col_widths=[Cm(2.5), Cm(4), Cm(7)])
+add_body(doc, '参数组合之间不存在硬约束，各参数可在取值区间内独立调整，上述倾向仅为规则配置的推荐起点。')
+
+add_body_bold_prefix(doc, '（三）规则引擎开发', '')
+add_body(doc, '将上述规则设计成果转化为可执行的规则引擎代码。')
+add_body_bold_prefix(doc, '规则引擎执行流程', '：')
+add_body(doc, '1. 输入阶段：接收战术类型选择和参数配置（可由用户手动指定或由参数矩阵自动采样生成）；')
+add_body(doc, '2. 规则加载：根据所选战术类型加载对应的规则配置文件，并将7个参数值注入规则执行上下文；')
+add_body(doc, '3. 规则执行：执行规则，生成结构化决策数据；')
+add_body(doc, '4. 输出阶段：将规则执行结果按照三层级数据模式格式封装输出，交由数据生成框架后续处理。')
+add_body_bold_prefix(doc, '规则配置管理', '：规则引擎采用配置与代码分离的架构，规则定义文件与引擎执行代码独立维护；5套战术规则以独立配置文件形式管理，运行时通过配置文件切换战术类型；规则引擎以标准化接口与数据生成框架对接。')
+add_body_bold_prefix(doc, '规则引擎内部组件划分', '：规则引擎由以下4个内部模块组成，各模块职责明确、接口清晰：')
+add_table(doc, ['模块名称', '职责描述'], [
+    ['配置加载器', '根据输入的战术类型标签，从配置目录中读取对应的规则配置文件（YAML格式），解析规则条目、参数约束定义及执行优先级'],
+    ['参数注入器', '接收7个参数的具体取值，将参数值注入规则执行上下文，实现参数与规则条件的动态绑定；支持参数范围校验，越界值自动截断至有效区间'],
+    ['分层规则执行器', '按编队→单舰→装备三层级顺序逐层执行规则：先生成编队级的整体态势与决策数据，再依据编队指令生成各舰的单舰级数据，最后生成装备级的武器使用与传感器数据；层级间数据通过场景ID串联'],
+    ['数据格式化器', '将三层级执行结果按统一数据模式组装为标准化JSON结构，完成字段名称归一化与数据类型转换，经统一接口输出至数据生成框架的后续处理环节'],
+], col_widths=[Cm(3), Cm(10.5)])
+add_body(doc, '各模块间通过内部接口传递数据，模块可独立测试与替换。')
+
+# ——— 4.2.2 双模式数据生成框架 ———
+add_subsection_title(doc, '4.2.2 双模式数据生成框架')
+add_body(doc, '实际工程中，数据来源的可用情况在项目不同阶段存在根本性差异：项目初期往往缺乏历史演习数据，只能依赖规则引擎从零生成；随着项目推进，真实演习数据逐步积累，其蕴含的真实战术知识具有纯规则生成数据无法替代的价值。若仅支持单一数据来源，系统的适用范围将受到严重限制。为此，本项目构建冷启动与热启动两种互补的数据生成模式：冷启动面向无历史数据的场景，以规则引擎参数化驱动仿真平台批量生成结构规整的样本；热启动面向已有历史数据的场景，以真实演习数据为种子通过清洗增强扩大覆盖。两种模式共用同一套数据入库流水线和数据库结构，产出数据形式统一。')
+add_body(doc, '两种模式的定位与特点对比如下：')
+add_table(doc, ['对比维度', '冷启动模式', '热启动模式'], [
+    ['数据来源', '参数化规则引擎 + 仿真平台', '已有演习数据 / 开源数据'],
+    ['驱动方式', '仿真想定驱动', '真实数据联合仿真想定驱动'],
+    ['核心优势', '系统性覆盖参数空间，分布均匀', '保留真实战术知识，近真实性高'],
+    ['数据特征', '结构规整，参数可控，可大规模批量生成', '含噪声与不确定性，更贴近实战'],
+    ['适用阶段', '项目初期无历史数据积累时', '已获取演习或实战数据后'],
+], col_widths=[Cm(2.5), Cm(5.5), Cm(5.5)])
+
+add_body_bold_prefix(doc, '（一）冷启动模式', '')
+add_body(doc, '基于规则引擎生成结构化决策数据样本，完整数据流程如下：')
+add_table(doc, ['步骤', '处理内容', '输入', '输出'], [
+    ['① 参数配置生成', '根据5种战术类型×7个参数构建参数矩阵，通过参数组合生成多样化配置', '战术类型选择、参数取值范围', '参数配置集合'],
+    ['② 规则引擎执行', '规则引擎按参数配置生成结构化决策数据', '参数配置', '结构化决策数据（态势+方案+行动）'],
+    ['③ 格式转换', '将规则引擎输出转换为仿真平台可识别的想定格式', '结构化决策数据', '仿真想定文件'],
+    ['④ 仿真执行', '仿真平台加载想定执行仿真，生成过程数据', '仿真想定文件', '仿真过程数据（含态势演变、行动轨迹）'],
+    ['⑤ 数据采集与入库', '采集仿真输出，经格式转换与字段映射后写入样本数据库', '仿真过程数据', '入库的三层级样本记录'],
+], col_widths=[Cm(2.5), Cm(4.5), Cm(3), Cm(3.5)])
+add_body(doc, '冷启动链路涉及规则引擎输出与仿真平台之间的格式转换开发，以配置文件驱动字段映射。')
+
+add_body_bold_prefix(doc, '参数采样策略', '：为保证生成数据的多样性与参数空间覆盖充分性，冷启动框架支持以下三种采样策略，可单独使用或组合使用：')
+add_numbered_body(doc, '1', '网格采样', '：对7个参数各取3～5个离散取值点，构建参数网格，通过笛卡尔积组合生成系统性配置集合。5种战术类型叠加参数网格，单次任务可生成数千条基础配置，确保典型参数组合均有覆盖。')
+add_numbered_body(doc, '2', '随机采样', '：在各参数的连续取值范围内进行均匀随机抽取，生成分布更为均匀的多样化配置集合，弥补网格采样固定间隔带来的规律性偏差，提升参数空间的随机覆盖密度。')
+add_numbered_body(doc, '3', '边界增强采样', '：对每个参数的极值组合（全高值、全低值、混合极值）进行重点采样，确保边界条件和极端场景下的数据完备性。边界样本对模型鲁棒性训练具有较高价值，作为基础采样的补充使用。')
+add_body(doc, '三种策略通过配置参数指定，支持按比例混合（如70%随机+20%网格+10%边界），采样结果汇总后统一输入规则引擎执行。')
+
+add_body_bold_prefix(doc, '（二）热启动模式', '')
+add_body(doc, '以真实演习/开源数据为种子，通过数据增强扩大样本覆盖：')
+add_bullet(doc, '：对来源数据进行格式归一化与异常值处理，统一输出为三层级决策数据模式格式。', bold_prefix='数据清洗程序')
+add_bullet(doc, '：在清洗后的原始样本基础上，对7个点位参数施加受控随机扰动，生成扩展样本。', bold_prefix='参数扰动增强程序')
+add_body(doc, '冷启动模式与热启动模式互补，分别覆盖无历史数据和有历史数据两种场景。')
+
+# ——— 4.2.3 三层级决策建模样本数据库与数据服务 ———
+add_subsection_title(doc, '4.2.3 三层级决策建模样本数据库与数据服务')
+add_body(doc, '海上作战决策模型的构建需求具有明显的层级异构性：编队级模型关注整体战术决策，平台级模型关注单舰行动规划，装备级模型关注武器运用时机。若数据以扁平化方式存储，不同粒度的建模需求将难以高效检索，跨层级的数据关联与溯源也无从实现。为此，本项目按照编队—单舰—装备三层级组织样本数据库，使数据的存储结构与决策建模的层级需求精确对应；同时建立数据治理体系，以规模性、多样性、价值性三维指标对入库样本的质量进行持续评价，确保数据库对模型训练的有效支撑；并通过数据服务接口向外部研究提供按任务查询和个性化定制两类数据取用方式。')
+
+add_body_bold_prefix(doc, '（一）三层级数据库', '')
+add_body(doc, '数据库按照编队级、单舰（平台）级、武器装备级三个层级组织，各层级存储的数据字段分类如下：')
+add_table(doc, ['层级', '态势类字段', '决策类字段', '行动类字段'], [
+    ['编队级', '编队整体态势（阵型、方位、敌我态势比）', '编队作战方案（战术类型、作战意图、任务分工）', '编队机动指令（航向航速、队形变换、协同时序）'],
+    ['单舰级', '单舰态势（位置、航向、传感器探测结果）', '单舰决策（目标选择、交战时机、武器分配）', '单舰行动（机动轨迹、火力执行、通信交互）'],
+    ['装备级', '装备状态（弹药量、传感器状态、舰载机/无人机可用状态）', '装备使用决策（武器选择、发射参数、航空兵力调用决策）', '装备动作（发射记录、探测记录、舰载机/无人机出动记录）'],
+], col_widths=[Cm(1.8), Cm(4), Cm(4), Cm(3.7)])
+add_body(doc, '各层级数据结构独立定义，支持按层级独立检索。层级间建立关联关系（编队→舰艇→装备），同一作战事件下的各层级数据通过事件标识关联，支持跨层级的聚合查询与溯源。三个层级分别建表，层级间通过外键关联（编队ID→舰艇ID→装备ID），开发数据入库流水线和多维查询接口。')
+
+add_body_bold_prefix(doc, '编队级主要数据字段', '：')
+add_table(doc, ['字段名', '类型', '说明'], [
+    ['scenario_id', 'String', '作战场景唯一标识，贯穿三层级数据关联'],
+    ['timestamp', 'DateTime', '数据记录时间戳（仿真时间）'],
+    ['tactical_type', 'Enum', '战术类型（进攻/防守/侧翼包抄/保守/协同突破）'],
+    ['formation_shape', 'String', '编队阵型（楔形/一字/纵列/散开/环形）'],
+    ['red_force_count', 'Int', '红方参战平台总数'],
+    ['blue_force_count', 'Int', '蓝方参战平台总数'],
+    ['force_ratio', 'Float', '红蓝兵力数量比'],
+    ['tactical_intent', 'String', '作战意图标签（与战术类型对应的语义描述）'],
+    ['task_assignment', 'JSON', '编队内各平台任务分工映射表'],
+    ['heading', 'Float', '编队整体机动航向（度，0～360）'],
+    ['speed_coeff', 'Float', '机动速度系数（对应参数①，0.3～1.0）'],
+    ['formation_interval', 'Float', '队形节点间距（km，对应参数③）'],
+    ['formation_changed', 'Boolean', '本时间步是否发生队形变换'],
+    ['sync_timing', 'JSON', '协同时序安排（各平台行动时序JSON数组）'],
+    ['ooda_stage', 'Enum', '当前所处OODA阶段（侦察/判断/决策/行动）'],
+], col_widths=[Cm(4), Cm(2), Cm(7.5)], body_size=Pt(11))
+
+add_body_bold_prefix(doc, '单舰（平台）级主要数据字段', '：')
+add_table(doc, ['字段名', '类型', '说明'], [
+    ['ship_id', 'String', '舰艇/平台唯一标识'],
+    ['scenario_id', 'String', '关联场景标识（外键）'],
+    ['timestamp', 'DateTime', '数据记录时间戳'],
+    ['position_x', 'Float', '位置横坐标（km，场景坐标系）'],
+    ['position_y', 'Float', '位置纵坐标（km，场景坐标系）'],
+    ['heading', 'Float', '当前航向（度）'],
+    ['speed', 'Float', '当前航速（节）'],
+    ['sensor_range', 'Float', '传感器探测半径（km，对应参数④）'],
+    ['detected_targets', 'JSON', '当前已探测目标列表（ID、位置、类型）'],
+    ['target_selected', 'String', '当前选中交战目标ID（对应参数⑤优先级逻辑）'],
+    ['engage_distance', 'Float', '交战距离阈值（km，对应参数②）'],
+    ['weapon_allocated', 'String', '已分配武器类型'],
+    ['collab_weight', 'Float', '协同权重（对应参数⑥，影响协同行动决策）'],
+    ['action_trajectory', 'JSON', '本时间步机动轨迹坐标序列'],
+    ['fire_executed', 'Boolean', '本时间步是否执行火力动作'],
+    ['comm_log', 'JSON', '通信交互记录（来源ID、指令内容、时间）'],
+    ['retreat_triggered', 'Boolean', '是否触发撤退条件（对应参数⑦）'],
+], col_widths=[Cm(4), Cm(2), Cm(7.5)], body_size=Pt(11))
+
+add_body_bold_prefix(doc, '装备级主要数据字段', '：')
+add_table(doc, ['字段名', '类型', '说明'], [
+    ['equip_id', 'String', '装备唯一标识'],
+    ['ship_id', 'String', '所属平台标识（外键）'],
+    ['scenario_id', 'String', '关联场景标识（外键）'],
+    ['timestamp', 'DateTime', '数据记录时间戳'],
+    ['equip_type', 'Enum', '装备类型（导弹/鱼雷/舰载机/无人机/传感器）'],
+    ['ammo_remaining', 'Int', '剩余弹药量（发/枚）'],
+    ['sensor_status', 'Enum', '传感器工作状态（正常/关闭/受干扰）'],
+    ['aviation_available', 'Int', '可出动舰载机/无人机数量'],
+    ['weapon_selected', 'String', '本次行动选择使用的武器型号'],
+    ['launch_params', 'JSON', '发射参数（射击角度、初速、目标坐标）'],
+    ['aviation_dispatched', 'Int', '本时间步实际出动航空兵力数量'],
+    ['fire_record', 'JSON', '发射记录（时间戳、目标ID、弹药类型）'],
+    ['detect_record', 'JSON', '探测记录（发现目标时间、目标位置、目标类型）'],
+    ['equip_effectiveness', 'Float', '装备效能评估值（0～1，由仿真平台输出）'],
+], col_widths=[Cm(4), Cm(2), Cm(7.5)], body_size=Pt(11))
+
+add_body_bold_prefix(doc, '（二）数据治理', '')
+add_body(doc, '对数据库中的样本实施规模性、多样性、价值性三维质量评价，各维度均定义可计算的量化指标与综合得分公式，评价结果在Web前端看板中实时展示。')
+
+add_body_bold_prefix(doc, '1. 规模性评价', '')
+add_body(doc, '规模性评价衡量样本数量是否满足决策建模需求，计算以下指标：')
+add_body_md(doc, r'总样本量：$N = \sum_{k=1}^{5} n_k$，其中 $n_k$ 为第 $k$ 种战术类型的样本数（$k=1,\ldots,5$）')
+add_body_md(doc, r'战术类型分布均衡度：$E_{tac} = \frac{\min_k(n_k)}{\max_k(n_k)}$，取值区间 $[0,1]$，越接近 1 表示各战术类型样本越均衡')
+add_body_md(doc, r'层级覆盖均衡度：$E_{level} = \frac{\min(N_{\text{编队}},N_{\text{单舰}},N_{\text{装备}})}{\max(N_{\text{编队}},N_{\text{单舰}},N_{\text{装备}})}$，反映三层级数据量是否同步充足')
+add_body(doc, '规模性综合得分：')
+add_formula(doc, r'S_{scale} = \min\left(1, \frac{N}{N_{target}}\right) \times E_{tac} \times E_{level}')
+add_body_md(doc, r'其中 $N_{target}$ 为用户在任务配置中设定的目标样本量，$S_{scale} \in [0,1]$。')
+
+add_body_bold_prefix(doc, '2. 多样性评价', '')
+add_body(doc, '多样性评价衡量样本是否充分覆盖参数空间与战术场景：')
+add_body(doc, '单参数取值熵（对第 j 个参数，j = 1,...,7）：')
+add_formula(doc, r'H_j = -\sum_{v} p_j(v)\,\log_2 p_j(v)')
+add_body_md(doc, r'其中 $p_j(v)$ 为参数 $j$ 取值 $v$ 在全库样本中的频率。')
+add_body_md(doc, r'归一化参数熵：$\tilde{H}_j = H_j / H_{j,\max}$，其中 $H_{j,\max}$ 为参数 $j$ 在取值区间均匀分布时的最大熵（连续参数离散化后计算）')
+add_body(doc, '战术类型分布熵及归一化：')
+add_formula(doc, r'H_{tac} = -\sum_{k=1}^{5} \frac{n_k}{N}\log_2\frac{n_k}{N}, \quad \tilde{H}_{tac} = \frac{H_{tac}}{\log_2 5}')
+add_body(doc, '多样性综合得分：')
+add_formula(doc, r'S_{div} = \frac{1}{8}\left(\sum_{j=1}^{7}\tilde{H}_j + \tilde{H}_{tac}\right)')
+add_body_md(doc, r'$S_{div} \in [0,1]$，越接近 1 表示参数空间覆盖越均匀。')
+
+add_body_bold_prefix(doc, '3. 价值性评价', '')
+add_body(doc, '价值性评价衡量样本对决策建模的实际有效支撑程度：')
+add_body(doc, '字段完整性率：')
+add_formula(doc, r'R_{complete} = \frac{\sum_{i=1}^{N} f_i^{filled}}{\sum_{i=1}^{N} f_i^{total}}')
+add_body_md(doc, r'其中 $f_i^{filled}$ 为第 $i$ 条记录中非空字段数，$f_i^{total}$ 为该记录总字段数。')
+add_body(doc, 'OODA全过程覆盖率：')
+add_formula(doc, r'R_{OODA} = \frac{1}{4}\sum_{s \in \{\text{侦察},\text{判断},\text{决策},\text{行动}\}} \frac{N_s}{N}')
+add_body_md(doc, r'其中 $N_s$ 为在 OODA 阶段 $s$ 有完整数据记录的样本数。')
+add_body(doc, '跨层级一致性率：')
+add_formula(doc, r'R_{consist} = \frac{M_{linked}}{N_{scenario}}')
+add_body_md(doc, r'其中 $M_{linked}$ 为编队—单舰—装备三层级数据均完整关联的场景事件数，$N_{scenario}$ 为总场景事件数。')
+add_body(doc, '价值性综合得分：')
+add_formula(doc, r'S_{val} = R_{complete} \times R_{OODA} \times R_{consist}')
+
+add_body_bold_prefix(doc, '4. 三维综合评分', '')
+add_formula(doc, r'S_{total} = w_1 S_{scale} + w_2 S_{div} + w_3 S_{val}')
+add_body_md(doc, r'权重 $w_1, w_2, w_3$ 默认各取 $1/3$，可在系统配置文件中按需调整。$S_{total} \in [0,1]$，在Web前端数据治理看板中以仪表盘形式实时展示。')
+
+add_body_bold_prefix(doc, '（三）数据服务接口', '')
+add_body(doc, '提供以下两类数据服务：')
+add_bullet(doc, '：开发查询接口，支持按任务类型、战术类型、层级等条件检索数据库。', bold_prefix='典型任务查询服务')
+add_bullet(doc, '：开发数据组装接口，接收用户自定义参数配置，按配置筛选和组装数据样本。', bold_prefix='个性化定制生成服务')
+
+# ——— 4.2.4 数据管理Web前端设计方案 ———
+add_subsection_title(doc, '4.2.4 数据管理Web前端设计方案')
+add_body(doc, '数据生成和数据库是本项目的后端能力，而研究人员使用数据的主要方式是通过交互界面——发起生成任务、按条件检索样本、查看数据质量状况。若缺乏统一的操作入口，后端能力将因操作门槛过高而难以被高效利用。Web前端的职责是将后端各项能力以可视化、可交互的方式呈现出来：任务管理界面面向数据生产流程，让用户能够灵活配置和监控生成任务；查询浏览界面面向数据消费需求，支持多维条件组合检索和跨层级溯源；治理看板面向数据质量管理，通过可视化指标帮助用户判断当前数据库是否满足建模需求，并识别需要补充的数据类型。')
+add_body(doc, '数据管理Web前端提供数据查询浏览、数据生成任务管理、数据治理看板三类界面，面向研究人员和数据管理员提供统一的操作入口。')
+
+add_body_bold_prefix(doc, '（一）数据查询浏览界面', '')
+add_body(doc, '界面划分为三个功能区，支持多维条件组合检索与跨层级数据溯源：')
+add_bullet(doc, '：提供以下筛选维度——战术类型（多选，5种），数据层级（编队级/单舰级/装备级），生成模式（冷启动/热启动），时间范围（仿真时间区间），质量阈值（三维得分下限，过滤低质量记录）。各条件之间为与逻辑，组合后提交查询。', bold_prefix='查询条件区')
+add_bullet_md(doc, r'：分页展示查询匹配记录，支持按场景ID、战术类型、时间戳、字段完整性得分多列排序。列表条目显示摘要信息（场景ID、战术类型、时间戳、$R_{complete}$ 得分），支持批量导出为CSV格式。', bold_prefix='结果列表区')
+add_bullet(doc, '：点击列表条目后展开侧边详情面板，显示该记录全部字段内容。提供跨层级溯源功能：从编队级记录可一键跳转至同场景下关联的全部单舰级记录，进而跳转至各舰的装备级记录，实现三层级数据联动查阅。', bold_prefix='数据详情区')
+
+add_body_bold_prefix(doc, '（二）数据生成任务管理界面', '')
+add_body(doc, '支持冷启动和热启动任务的全生命周期管理：')
+add_bullet(doc, '：选择生成模式后，呈现对应配置项。冷启动模式配置项：战术类型选择（多选）、采样策略（网格/随机/边界增强及混合比例）、目标样本数量、参数取值范围覆盖设置。热启动模式配置项：种子数据文件上传（支持CSV/JSON格式）、扰动参数设置（每个参数的扰动幅度）。', bold_prefix='任务创建区')
+add_bullet(doc, '：以表格展示历史任务，列包括任务ID、生成模式、创建时间、当前状态（等待中/运行中/已完成/失败）、已入库样本数、耗时。支持对运行中任务执行终止操作；对失败任务展示错误日志摘要。', bold_prefix='任务列表区')
+add_bullet(doc, '：任务完成后展示本次生成统计：各战术类型生成数量分布、入库成功率、格式转换失败记录数。提供跳转至查询界面并预填本次任务筛选条件的快捷入口。', bold_prefix='任务结果区')
+
+add_body_bold_prefix(doc, '（三）数据治理看板', '')
+add_body(doc, '以可视化图表实时展示数据库整体质量状态，数据自动刷新，支持手动触发全库重算：')
+add_bullet_md(doc, r'：总样本量数值卡片；各战术类型样本量分布柱状图；三层级样本量均衡度 $E_{level}$ 指示条；$S_{scale}$ 综合得分仪表盘。', bold_prefix='规模性面板')
+add_bullet_md(doc, r'：7个参数各自的取值频率分布直方图；战术类型分布饼图；归一化参数熵 $\tilde{H}_j$ 的雷达图（7维）；$S_{div}$ 综合得分仪表盘。', bold_prefix='多样性面板')
+add_bullet_md(doc, r'：OODA四阶段覆盖率环形进度图（四段分别显示 $N_s/N$）；跨层级一致性率 $R_{consist}$ 数值卡片；字段完整性率 $R_{complete}$ 横向进度条（按层级分别展示）；$S_{val}$ 综合得分仪表盘。', bold_prefix='价值性面板')
+add_bullet_md(doc, r'：三维加权综合得分 $S_{total}$ 大仪表盘；权重调整滑块（调整后实时刷新 $S_{total}$）；历史得分趋势折线图（以数据生成任务批次为横轴）。', bold_prefix='综合面板')
+
+# ——— 4.2.5 仿真平台接口适配设计方案 ———
+add_subsection_title(doc, '4.2.5 仿真平台接口适配设计方案')
+add_body(doc, '冷启动数据生成链路的关键环节是规则引擎与仿真平台之间的数据流转：规则引擎产出的参数化配置需要被翻译为仿真平台可直接加载的想定格式，仿真平台执行后产出的对战状态数据（GameState）又需要被采集、归一化并映射回三层级数据模式，才能最终写入样本数据库。这两个方向的格式转换构成冷启动链路的技术难点，格式不匹配将导致数据流中断或入库字段缺失。接口适配层的设计目标是将转换规则从代码中抽离至配置文件，使框架在不修改引擎代码的前提下，通过调整配置即可适配不同版本的仿真平台格式。')
+add_body(doc, '本项目数据生成框架与现有仿真平台通过标准化接口对接，接口适配层负责规则引擎输出与仿真平台之间的双向格式转换，以及仿真执行过程中的数据采集。')
+
+add_body_bold_prefix(doc, '（一）想定数据输入接口', '')
+add_body(doc, '规则引擎输出的参数化配置需转换为仿真平台可识别的想定格式，适配流程如下：')
+add_bullet(doc, '：标准化JSON结构，包含战术类型标签、兵力配置列表（含平台数量、类型、初始位置）、7个参数取值、初始态势坐标（场景坐标系）。', bold_prefix='规则引擎输出格式')
+add_bullet(doc, '：以YAML格式定义源字段→目标字段的映射关系，覆盖字段名映射、数据类型转换规则（如Float→Int截断）、坐标系换算参数、枚举值对照表（如战术类型枚举→仿真平台内部编码）。映射配置与转换代码分离，适配新版仿真平台格式时仅需修改配置文件，无需变更引擎代码。', bold_prefix='字段映射配置文件')
+add_bullet(doc, '：读取字段映射配置，对规则引擎输出JSON执行字段重命名、类型转换、坐标变换等处理，生成仿真平台可直接加载的想定文件，支持XML和JSON两种目标格式（通过配置切换）。', bold_prefix='格式转换器模块')
+
+add_body_bold_prefix(doc, '（二）GameState数据采集接口', '')
+add_body(doc, '仿真执行过程中，采集接口持续从仿真平台获取完整对战状态数据并转存至数据处理管道：')
+add_bullet(doc, '：支持两种触发模式，通过配置文件切换：①时间步触发，按仿真平台固定帧率逐步采集，默认每步全量采集；②事件触发，在关键仿真事件发生时采集（探测到敌方目标、开火、队形变换、舰载机/无人机出动、触发撤退条件），生成事件帧数据。', bold_prefix='采集触发机制')
+add_bullet(doc, '：各平台位置坐标（场景坐标系）、航向、航速、剩余弹药量、传感器当前探测结果列表、当前执行指令状态、舰载机/无人机可用及出动数量。', bold_prefix='采集字段范围')
+add_bullet(doc, '：采集数据经以下步骤处理后写入中间缓冲区：字段映射（仿真平台内部字段名→三层级数据模式字段名）；坐标还原（仿真平台内部坐标系→场景标准坐标系，km单位）；异常值处理（越界坐标截断至场景范围、缺失必填字段记录告警日志、类型不匹配字段执行强制转换或置空）。', bold_prefix='数据归一化处理')
+add_bullet(doc, '：归一化后的数据先写入内存缓冲队列，由独立写入线程批量刷写至样本数据库，避免频繁IO阻塞仿真采集流程。', bold_prefix='缓冲写入机制')
+
+# ——— 4.3 关键技术 ———
+add_section_title(doc, '4.3 关键技术')
+add_body(doc, '本项目需突破以下关键技术，分别对应项目拟解决的三个核心问题。')
+
+add_subsection_title(doc, '关键技术一：多层级决策任务与数据样本需求的映射方法')
+add_body(doc, '海上作战决策任务按层级区分为编队级、平台级和武器运用级三个层次。决策任务划分的层次、粒度和任务间的关系，决定了数据样本的结构、内容和样本之间的聚合支撑关系。本项目需解决三层决策任务之间的关系建模、各层级数据样本需求定义、以及跨层级数据聚合与溯源等技术问题。')
+
+add_subsection_title(doc, '关键技术二：基于博弈对抗的海上作战决策建模数据样本生成机制')
+add_body(doc, '面向海上作战智能决策模型构建对大规模数据样本的需求，需解决如何以近似实战条件下的小样本数据为基础，基于先验领域知识引导下的数据生成算法，通过作战博弈对抗仿真生成决策建模大数据，且在此过程中通过参数化战术规则机制保证大数据样本的有效性、多样性、近真实性，同时避免策略组合爆炸，并使生成数据能够支撑智能体的场景迁移能力培育。具体包括：5种战术行为类型的参数化规则设计与7参数联动的执行机制、多维参数空间的采样与批量生成策略、以及冷热双模式互补生成机制。')
+
+add_subsection_title(doc, '关键技术三：多源决策建模用数据样本的分类标注与融合技术')
+add_body(doc, '用于海上作战决策建模的数据，除本项目冷启动生成的仿真数据外，还包括热启动引入的演习数据以及未来可能从外部渠道采集的结构化与非结构化数据。需解决多源异构数据的统一数据模式设计、不同来源数据的字段语义对齐与归一化、非结构化决策数据中语义信息的提取与辅助分类标注、多层级数据样本的分类归档与跨层级融合（按装备级→平台级→编队级逐层聚合）、以及规模性/多样性/价值性三维质量评价等技术问题。')
+
+# ========== 五、质量保证规定 ==========
+add_chapter_title(doc, '五、质量保证规定')
+
+add_section_title(doc, '5.1 成立质量管理组织')
+add_body(doc, '成立项目质量管理组织，由系统架构师兼任项目负责人统筹质量管理工作，配备适宜数量和资质的项目人员，明确各岗位质量责任，各司其职。')
+
+add_section_title(doc, '5.2 制定质量保证计划')
+add_body(doc, '根据项目实施里程碑与质量控制要点，制定详细质量保证计划，明确各阶段交付物的验收标准与评审节点。')
+
+add_section_title(doc, '5.3 落实质量保障措施')
+add_body(doc, '在项目实施过程中，根据项目实施阶段采取分阶段质量保障措施：需求分析阶段进行需求评审，设计阶段进行设计评审，开发阶段执行代码审查与单元测试，验收阶段执行集成测试与指标逐项验证。')
+
+add_section_title(doc, '5.4 加强技术状态管理')
+add_body(doc, '按技术状态控制要求实施管理，涉及功能、性能、使用等重大技术状态变更须重新通过相关方评审，并经甲方认可后方可实施。')
+
+add_section_title(doc, '5.5 严格进行质量测试')
+add_body(doc, '编制检验规范，在验收环境下实施自检，保留自检记录；提交甲方验收时提供软件自检合格记录及测试合格记录。')
+
+add_section_title(doc, '说明事项')
+add_body(doc, '无。')
+
+# ========== 六、项目实施计划 ==========
+add_chapter_title(doc, '六、项目实施计划')
+
+add_section_title(doc, '6.1 实施阶段划分')
+add_body(doc, '项目按以下五个阶段顺序推进，各阶段工作内容与交付物如下：')
+add_table(doc, ['阶段', '主要工作内容', '阶段交付物'], [
+    ['第一阶段：数据建模与规则体系设计',
+     '开展海上作战决策数据需求分析；定义编队/单舰/装备三层级数据模式与字段规范；研究并划分5种战术行为类型及7参数控制体系；形成数据模式规范文档',
+     '数据需求分析研究报告、规则体系设计说明文档'],
+    ['第二阶段：规则引擎与数据生成框架开发',
+     '开发参数化规则引擎（含配置加载器、参数注入器、分层执行器、格式化器）；搭建冷启动数据生成框架（含三种采样策略）；开发热启动数据清洗与增强程序；完成仿真平台双向接口适配开发',
+     '规则引擎模块、冷启动/热启动数据生成框架、仿真平台接口适配程序'],
+    ['第三阶段：数据库与数据治理部件开发',
+     '建立三层级样本数据库（建表、索引、外键关联）；开发数据入库流水线（含缓冲写入机制）；实现三维质量评价计算（含规模性/多样性/价值性公式）；开发典型任务查询和个性化定制两类数据服务接口',
+     '三层级数据库、数据治理计算模块、数据服务接口文档'],
+    ['第四阶段：Web前端开发与系统集成',
+     '开发数据查询浏览、数据生成任务管理、数据治理看板三类Web界面；完成前后端接口联调；开展端到端数据流联通验证（冷启动链路全流程贯通、热启动链路全流程贯通、查询与定制服务验证）',
+     'Web前端系统、系统集成测试报告'],
+    ['第五阶段：测试验收',
+     '编制检验规范；执行单元测试和集成测试；对照10项技术指标逐项验证，形成自检合格记录；整理全套文档资料，准备验收材料',
+     '软件测试报告、使用手册、技术指标验证记录、验收报告'],
+], col_widths=[Cm(3), Cm(6.5), Cm(4)], body_size=Pt(11))
+
+add_section_title(doc, '6.2 关键里程碑')
+add_table(doc, ['里程碑', '内容'], [
+    ['M1：数据模式冻结', '三层级数据字段规范、5种战术类型及7参数体系定义完成，通过内部评审后冻结，后续开发以此为基准'],
+    ['M2：冷启动链路贯通', '从参数配置生成→规则引擎执行→格式转换→仿真平台执行→GameState采集→数据入库全流程打通，完成端到端冒烟测试'],
+    ['M3：系统集成完成', '所有功能模块开发完毕，前后端联调通过，数据治理看板可正常展示质量指标'],
+    ['M4：验收通过', '10项技术指标全部通过测试验证，文档资料齐全，提交验收'],
+], col_widths=[Cm(3.5), Cm(10)])
+
+# 落款
+for _ in range(2):
+    add_para(doc, '', line_spacing=Pt(20))
+add_para(doc, '超参数科技（深圳）有限公司', align=WD_ALIGN_PARAGRAPH.RIGHT,
+         line_spacing=LINE_SPACING_BODY, size=Pt(14))
+
+# ========== 保存 ==========
+output_path = 'e:/CC/项目/海上无人集群/样本生成项目技术规格书v0.2.docx'
+doc.save(output_path)
+print(f'文档已生成: {output_path}')
