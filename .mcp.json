@@ -1,0 +1,27 @@
+{
+  "mcpServers": {
+    "gemini-image": {
+      "command": "python",
+      "args": [
+        "e:\\CC\\cc-tools\\tools\\gemini_image_server.py"
+      ]
+    },
+    "whisper-local": {
+      "command": "python",
+      "args": [
+        "e:\\CC\\cc-tools\\tools\\whisper_mcp_server.py"
+      ]
+    },
+    "obsidian": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@mseep/obsidian-mcp-server"
+      ],
+      "env": {
+        "OBSIDIAN_REST_API_KEY": "4f5bbead024048ef118a5d5fe627cdb1d93b5d6f5a8f5a08f694d3d87b73d0d2",
+        "OBSIDIAN_REST_API_URL": "http://localhost:27123"
+      }
+    }
+  }
+}

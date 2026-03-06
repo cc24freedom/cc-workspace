@@ -38,7 +38,7 @@ This is a **project documentation repository** for multiple AI agent / intellige
 
 **响应方式**：带有一定分析深度的回答，通常分点或表格呈现
 
----
+---11
 
 #### 🟡 中等复杂 → 使用 Sonnet（升级）
 
@@ -320,3 +320,4 @@ Is 新文档生成 OR 战略决策 OR 系统设计 OR 用户要求"深度思考"
 
 再按项目列训练天数和费用，汇总算力合计（万元）。
 
+11
