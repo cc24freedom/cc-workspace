@@ -15,7 +15,7 @@ from mcp.server.fastmcp import FastMCP
 API_BASE = "https://turingai.plus"
 API_KEY = "sk-H0FdQNttW5hOITfFofi535RHfw8VovvFWKyTkUHp8rMOYJyZ"
 MODEL = "gemini-3-pro-image-preview"
-OUTPUT_DIR = Path(r"e:\CC\cc-tools\generated_images")
+OUTPUT_DIR = Path(r"d:\cc\cc-tools\generated_images")
 TIMEOUT = 120  # 秒
 
 # 确保输出目录存在
