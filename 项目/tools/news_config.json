@@ -2,7 +2,7 @@
   "api_base_url": "https://anti.sssaicode.com/api/v1/messages",
   "api_key": "sk-sssaicode-d11a4b5555db141d0da2bfa462b38657a84744ebf67853ff82ed8e79b7184ad1",
   "model": "claude-haiku-4-5-20251001",
-  "news_dir": "E:\\CC\\cc-tools\\news",
+  "news_dir": "d:\\cc\\cc-tools\\news",
   "max_items_per_source": 8,
   "flash_keywords": ["快讯", "简讯", "速递", "早报", "晚报", "周报", "简报", "播报", "一句话", "8点1氪"],
   "min_title_length": 12,

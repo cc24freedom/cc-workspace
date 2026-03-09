@@ -3,13 +3,13 @@
     "gemini-image": {
       "command": "python",
       "args": [
-        "e:\\CC\\cc-tools\\tools\\gemini_image_server.py"
+        "d:\\cc\\项目\\tools\\gemini_image_server.py"
       ]
     },
     "whisper-local": {
       "command": "python",
       "args": [
-        "e:\\CC\\cc-tools\\tools\\whisper_mcp_server.py"
+        "d:\\cc\\项目\\tools\\whisper_mcp_server.py"
       ]
     },
     "obsidian": {
